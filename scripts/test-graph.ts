@@ -3,6 +3,7 @@ import { DEFAULT_STATE_LIMIT, findMinimalRepairs, MAX_PLANS } from '../src/lib/r
 import { computeMinDeviationSchedule } from '../src/lib/schedule'
 import { buildConsistentSample, buildContradictionSample } from '../src/lib/samples'
 import { migrateState } from '../src/lib/storage'
+import { buildImportBatch, parseDslDateTime, parseImportDsl } from '../src/lib/import-dsl'
 import type {
   Constraint,
   LayerResult,
@@ -1032,6 +1033,220 @@ function scheduleFeasible(
   assert(layerOf(r, 'low').D === 0, '排程：多观测下 B 期望精确可达 D=0')
   assert(r.entries[0].offsetMin === 0 && r.entries[1].offsetMin === 20, '排程：两事件分别由各自观测定时')
   assert(scheduleFeasible(events, [], obs, r, ANCHOR_ISO), '排程：多锚定场景可行')
+}
+
+// ==================== 批量证词导入 DSL ====================
+
+/** 解析 DSL 并返回结果（现有事件按需给定） */
+function parseDsl(text: string, existing: TEvent[] = []) {
+  return parseImportDsl(text, existing)
+}
+
+/** 断言某行号上存在匹配的错误（子串匹配） */
+function assertError(r: ReturnType<typeof parseDsl>, line: number, fragment: string, label: string) {
+  const hit = r.errors.some((e) => e.line === line && e.message.includes(fragment))
+  assert(hit, `${label}：第 ${line} 行应报告含 “${fragment}” 的错误（实际：${JSON.stringify(r.errors.filter((e) => e.line === line).map((e) => e.message))}）`)
+}
+function assertNoErrors(r: ReturnType<typeof parseDsl>, label: string) {
+  assert(r.errors.length === 0, `${label}：不应有错误（实际 ${r.errors.length} 个：${r.errors.map((e) => `L${e.line} ${e.message}`).join(' / ')}）`)
+}
+
+// ---- 时间解析与校验 ----
+assert(parseDslDateTime('2026-09-20T08:30') === '2026-09-20T08:30', 'DSL 时间：T 分隔合法')
+assert(parseDslDateTime('2026-09-20 08:30') === '2026-09-20T08:30', 'DSL 时间：空格分隔合法并归一化')
+assert(parseDslDateTime('2026-02-30T01:00') === null, 'DSL 时间：不存在的日期 2 月 30 日被拒')
+assert(parseDslDateTime('2026-13-01T01:00') === null, 'DSL 时间：非法月份被拒')
+assert(parseDslDateTime('2026-09-20T24:00') === null, 'DSL 时间：24 点被拒')
+assert(parseDslDateTime('2026-09-20T08:60') === null, 'DSL 时间：60 分被拒')
+assert(parseDslDateTime('2026-9-1T1:00') === null, 'DSL 时间：单位数月日被拒（必须补零）')
+assert(parseDslDateTime('2026-09-20T08:30:00') === null, 'DSL 时间：秒精度被拒（仅分钟）')
+assert(parseDslDateTime('garbage') === null, 'DSL 时间：乱码被拒')
+assert(parseDslDateTime('2024-02-29T00:00') === '2024-02-29T00:00', 'DSL 时间：闰日合法')
+assert(parseDslDateTime('2023-02-29T00:00') === null, 'DSL 时间：非闰年闰日被拒')
+
+// ---- 空行 / 注释 / 空白输入 ----
+{
+  const r = parseDsl('# 注释\n\n   \n\t\n#另一条注释')
+  assert(r.hasInput === false, 'DSL：仅注释与空行时 hasInput=false')
+  assert(r.items.length === 0 && r.errors.length === 0, 'DSL：空行与 # 注释被忽略')
+  assert(buildImportBatch(r, []) === null, 'DSL：无内容时批次为 null')
+}
+
+// ---- 三类语句的正常解析（含 JSON 转义、精确观测、零宽间隔） ----
+{
+  const r = parseDsl(`
+# 头部注释
+EVENT "报警" | "P1 告警\\n带换行"
+EVENT "恢复"
+REL "报警" earlier "恢复" 2..5
+REL "报警" later "恢复" 0..0
+OBS "报警" 2026-09-20T08:00..2026-09-20T08:00
+OBS "恢复" 2026-09-20 08:05..2026-09-20 09:10
+`)
+  assertNoErrors(r, '正常批次')
+  assert(r.events.length === 2 && r.constraints.length === 2 && r.observations.length === 2, 'DSL：三类语句计数正确')
+  assert(r.events[0].name === '报警' && r.events[0].note === 'P1 告警\n带换行', 'DSL：EVENT 名称与 JSON 转义备注正确解码')
+  assert(r.events[1].note === '', 'DSL：缺省备注为空串')
+  assert(r.items.map((i) => i.line).join(',') === '3,4,5,6,7,8', 'DSL：items 按原行序排列（忽略注释空行）')
+  assert(r.constraints[1].min === 0 && r.constraints[1].max === 0, 'DSL：0..0 精确间隔合法')
+  assert(r.observations[0].start === r.observations[0].end, 'DSL：同端点评为精确观测')
+  assert(r.observations[1].start === '2026-09-20T08:05' && r.observations[1].end === '2026-09-20T09:10', 'DSL：空格分隔时间归一化为 T')
+  const b = buildImportBatch(r, [])!
+  assert(b.events.length === 2 && b.constraints.length === 2 && b.observations.length === 2, 'DSL：批次条目数一致')
+  const idOf = Object.fromEntries(b.events.map((e) => [e.name, e.id]))
+  assert(b.constraints[0].aId === idOf['报警'] && b.constraints[0].bId === idOf['恢复'], 'DSL：批次约束引用映射到新事件 id')
+  assert(b.constraints[0].enabled === true, 'DSL：导入约束默认启用')
+  assert(b.observations[0].eventId === idOf['报警'], 'DSL：批次观测引用映射到新事件 id')
+  assert(b.events.every((e) => e.id.startsWith('ev_')) && b.constraints.every((c) => c.id.startsWith('ct_')) && b.observations.every((o) => o.id.startsWith('obs_')), 'DSL：新条目 id 前缀正确')
+}
+
+// ---- 引用现有事件 / 同批 EVENT，且前向引用合法 ----
+{
+  const existing: TEvent[] = [{ id: 'old1', name: '旧事件' }]
+  const r = parseDsl(`REL "新事件" later "旧事件" 3..8
+OBS "旧事件" 2026-01-01T00:00..2026-01-01T01:00
+EVENT "新事件"`, existing)
+  assertNoErrors(r, '现有+同批引用（含前向引用）')
+  assert(r.constraints[0].aIsNew === true && r.constraints[0].bIsNew === false, 'DSL：正确区分同批新事件与现有事件引用')
+  assert(r.observations[0].eventIsNew === false, 'DSL：观测引用现有事件')
+  const b = buildImportBatch(r, existing)!
+  assert(b.events.length === 1 && b.events[0].name === '新事件', 'DSL：批次只含新事件，不重复现有事件')
+  assert(b.constraints[0].bId === 'old1', 'DSL：引用映射到现有事件的真实 id')
+  assert(b.observations[0].eventId === 'old1', 'DSL：观测映射到现有事件的真实 id')
+  // 合并不覆盖现有数据：仅追加
+  assert(existing.length === 1 && existing[0].id === 'old1', 'DSL：现有事件数组不被修改')
+}
+
+// ---- EVENT 重名：同批重复声明 / 与现有事件重名 ----
+{
+  const existing: TEvent[] = [{ id: 'x', name: '旧名' }]
+  const r = parseDsl(`EVENT "A"
+EVENT "A"
+EVENT "旧名"`, existing)
+  assertError(r, 2, '重复声明事件', '同批 EVENT 重名')
+  assertError(r, 3, '与现有数据重名', 'EVENT 与现有重名')
+  assert(buildImportBatch(r, existing) === null, 'DSL：EVENT 重名时禁止生成批次')
+}
+
+// ---- 引用不唯一：同批重复声明被引用 / 与现有同名被引用 / 现有自身重名 ----
+{
+  const existing: TEvent[] = [
+    { id: 'd1', name: '重复' },
+    { id: 'd2', name: '重复' },
+    { id: 'u', name: '两边' },
+  ]
+  const r = parseDsl(`EVENT "X"
+EVENT "X"
+REL "X" earlier "重复" 1..2
+REL "两边" earlier "完全不存在的名字" 1..2
+EVENT "两边"
+EVENT "Y"
+REL "幽灵" later "B" 0..1`, existing)
+  assertError(r, 3, '引用不唯一', '同批重复 EVENT 被引用')
+  assertError(r, 3, '本批中被重复声明', '同批重复 EVENT 引用错误信息')
+  assertError(r, 3, '当前数据中已有 2 个', '现有事件自身重名导致引用不唯一')
+  assertError(r, 4, '既在第 5 行声明，又已存在', '同批与现有同名时引用不唯一')
+  assertError(r, 4, '不存在', '引用缺失报错')
+  assertError(r, 7, '幽灵', '完全未声明事件引用报错')
+  assert(buildImportBatch(r, existing) === null, 'DSL：引用歧义时禁止生成批次')
+}
+
+// ---- REL / OBS 重复声明（同批完全相同） ----
+{
+  const r = parseDsl(`EVENT "A"
+EVENT "B"
+REL "A" earlier "B" 1..3
+REL "A" earlier "B" 1..3
+REL "A" earlier "B" 1..4
+OBS "A" 2026-01-01T00:00..2026-01-01T00:00
+OBS "A" 2026-01-01T00:00..2026-01-01T00:00`)
+  assertError(r, 4, '重复声明约束', 'REL 完全重复')
+  assertError(r, 7, '重复声明观测', 'OBS 完全重复')
+  assert(!r.errors.some((e) => e.line === 5), 'DSL：区间不同的同两事件约束不算重复')
+}
+
+// ---- 非法区间（REL 与 OBS） ----
+{
+  const r = parseDsl(`EVENT "A"
+EVENT "B"
+REL "A" earlier "B" 5..2
+REL "A" earlier "B" -1..3
+REL "A" earlier "B" 1..x
+REL "A" earlier "B" 1
+OBS "A" 2026-01-01T09:00..2026-01-01T08:00
+OBS "A" 2026-01-01T09:00..2026-01-01T08:00..2026-01-01T10:00`)
+  assertError(r, 3, '最小值 5 大于最大值 2', 'REL min>max')
+  assertError(r, 4, '不能为负数', 'REL 负数')
+  assertError(r, 5, '非法区间', 'REL 非数字')
+  assertError(r, 6, 'min..max', 'REL 缺少 ..')
+  assertError(r, 7, '终点', 'OBS 倒挂区间')
+  assertError(r, 8, '多余的', 'OBS 多个 ..')
+}
+
+// ---- 时间格式与语句结构错误 ----
+{
+  const r = parseDsl(`EVENT "A"
+EVENT "B"
+OBS "A" 2026-13-01T00:00..2026-01-01T01:00
+OBS "A" nope..2026-01-01T01:00
+OBS "A" ..2026-01-01T01:00
+REL "A" sooner "B" 1..2
+REL "A" earlier "B"
+FOO "x"
+EVENT
+OBS "A" 2026-01-01T00:00..2026-01-01T01:00 多余
+EVENT "A" | "备注无尾引号
+EVENT "" | "备注"
+REL "A"earlier "B" 1..2
+REL "A" earlier "A" 0..0
+EVENT "A" 尾巴`)
+  assertError(r, 3, '非法时间格式', 'OBS 非法月份')
+  assertError(r, 4, '非法时间格式', 'OBS 起点乱码')
+  assertError(r, 5, '不完整', 'OBS 缺起点')
+  assertError(r, 6, 'earlier 或 later', 'REL 关系词非法')
+  assertError(r, 7, 'min..max', 'REL 缺区间')
+  assertError(r, 8, '未知语句类型', '未知关键字')
+  assertError(r, 9, '缺少名称', 'EVENT 缺名称')
+  assertError(r, 10, '无法识别的多余内容', 'OBS 尾部多余内容')
+  assertError(r, 11, '结束引号', 'JSON 字符串无尾引号')
+  assertError(r, 12, '名称不能为空', 'EVENT 空名称')
+  assertError(r, 13, '空格分隔', 'token 间缺空格')
+  assertError(r, 14, '两个事件不能相同', 'REL 自引用')
+  assertError(r, 15, '无法识别的多余内容', 'EVENT 尾部多余内容')
+  assert(buildImportBatch(r, []) === null, 'DSL：结构错误时禁止生成批次')
+}
+
+// ---- 错误按行号升序；正确语句仍出现在只读预览中 ----
+{
+  const r = parseDsl(`EVENT "A"
+REL "A" earlier "B" 1..2
+EVENT "B"
+REL "A" earlier "B" 9..9
+REL "A" earlier "B" 9..9`)
+  assert(r.items.length === 5, 'DSL：含错误时可解析语句仍列入预览')
+  const lineNos = r.errors.map((e) => e.line)
+  assert(lineNos.every((l, i) => i === 0 || lineNos[i - 1] <= l), 'DSL：错误列表按行号升序')
+  assertError(r, 5, '重复声明约束', '重复 REL 被捕获')
+  assert(r.constraints.length === 3, 'DSL：REL 条目计数')
+}
+
+// ---- 批次合并到 AppState 的模拟：不覆盖现有数据（端到端追加语义） ----
+{
+  const existing: TEvent[] = [{ id: 'keep', name: '保留事件', note: '原备注' }]
+  const r = parseDsl(`EVENT "新增事件"
+REL "新增事件" later "保留事件" 1..2
+OBS "保留事件" 2026-01-01T00:00..2026-01-01T00:00`, existing)
+  assertNoErrors(r, '合并模拟输入')
+  const batch = buildImportBatch(r, existing)!
+  const mergedEvents = [...existing, ...batch.events]
+  const mergedConstraints = [...batch.constraints]
+  const mergedObs = [...batch.observations]
+  assert(mergedEvents[0].id === 'keep' && mergedEvents[0].note === '原备注', 'DSL 合并：现有事件原样保留不被覆盖')
+  assert(mergedConstraints[0].aId === batch.events[0].id && mergedConstraints[0].bId === 'keep', 'DSL 合并：新约束跨新旧事件正确连接')
+  assert(mergedObs[0].eventId === 'keep', 'DSL 合并：新观测挂到现有事件')
+  // 合并后整体系统可被 analyze 正常求解（零宽观测 + 1..2 约束）
+  const merged = analyze(mergedEvents, mergedConstraints, mergedObs)
+  assert(merged.satisfiable, 'DSL 合并：合并后的差分系统可满足')
 }
 
 console.log(`\n${passed} passed, ${failed} failed`)

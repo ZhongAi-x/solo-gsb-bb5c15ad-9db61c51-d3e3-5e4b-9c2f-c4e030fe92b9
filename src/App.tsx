@@ -1,5 +1,6 @@
 import { useEffect, useMemo, useState } from 'react'
 import type { AppState, PriorityLevel, Constraint, TimeObservation, TEvent } from './types'
+import type { ImportBatch } from './lib/import-dsl'
 import { analyze, traceBound } from './lib/graph'
 import { findMinimalRepairs } from './lib/repair'
 import { computeMinDeviationSchedule } from './lib/schedule'
@@ -14,6 +15,7 @@ import { formatFullDateTime } from './lib/format'
 import EventEditor from './components/EventEditor'
 import ConstraintEditor from './components/ConstraintEditor'
 import ObservationEditor from './components/ObservationEditor'
+import ImportPanel from './components/ImportPanel'
 import GraphView, { edgeKey } from './components/GraphView'
 import CyclePanel from './components/CyclePanel'
 import WindowsTable from './components/WindowsTable'
@@ -306,6 +308,19 @@ export default function App() {
     }))
   }
 
+  // —— 批量证词导入：解析阶段已保证零错误且不与现有数据冲突，
+  //    这里只做一次性追加合并（绝不修改 / 覆盖现有事件、约束与观测），state 变更即持久化 ——
+  const applyImportBatch = (batch: ImportBatch) => {
+    setPreviewIndex(null)
+    setTraceReq(null)
+    setState((s) => ({
+      ...s,
+      events: [...s.events, ...batch.events],
+      constraints: [...s.constraints, ...batch.constraints],
+      observations: [...s.observations, ...batch.observations],
+    }))
+  }
+
   const loadSample = (kind: 'ok' | 'conflict') => {
     setPreviewIndex(null)
     setTraceReq(null)
@@ -479,6 +494,11 @@ export default function App() {
           traceNodes={traceNodeIdx}
           traceEdgeKeys={traceEdgeKeys}
         />
+      </div>
+
+      {/* 批量证词导入：DSL 只读预览 → 零错误后一次性合并持久化（不覆盖现有数据） */}
+      <div style={{ marginBottom: 16 }}>
+        <ImportPanel events={events} onApply={applyImportBatch} />
       </div>
 
       {/* 编辑器 */}

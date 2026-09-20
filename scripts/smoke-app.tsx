@@ -10,8 +10,10 @@ import App from '../src/App'
 import WindowsTable from '../src/components/WindowsTable'
 import CyclePanel from '../src/components/CyclePanel'
 import ObservationEditor from '../src/components/ObservationEditor'
+import ImportPanel from '../src/components/ImportPanel'
 import { analyze, traceBound } from '../src/lib/graph'
 import { buildConsistentSample } from '../src/lib/samples'
+import { parseImportDsl } from '../src/lib/import-dsl'
 
 let failed = 0
 /** React SSR 会在插值文本之间插入 <!-- -->，先去除再做片段匹配 */
@@ -63,6 +65,32 @@ const obsHtml = renderToString(
 )
 check(obsHtml, '添加观测', '观测编辑器')
 check(obsHtml, '发生于', '观测编辑器')
+
+// 1d) 批量证词导入：App 包含面板；有效 / 含错误两种 DSL 均可 SSR 渲染只读预览
+check(appHtml, '批量证词导入', '批量导入面板')
+check(appHtml, '解析并预览', '批量导入面板')
+{
+  const valid = parseImportDsl(
+    `EVENT "新事件"\nREL "新事件" later "值班告警触发" 3..8\nOBS "新事件" 2026-09-20T08:00..2026-09-20T08:30`,
+    s0.events,
+  )
+  const html = renderToString(
+    h(ImportPanel as never, { events: s0.events, onApply: () => {}, initialParsed: valid }),
+  )
+  check(html, '只读预览', '批量导入：只读预览')
+  check(html, '确认合并并持久化', '批量导入：确认按钮')
+  check(html, 'REL', '批量导入：REL 行')
+  check(html, 'OBS', '批量导入：OBS 行')
+  check(html, '引用现有事件', '批量导入：现有引用标记')
+
+  const bad = parseImportDsl(`EVENT "值班告警触发"\nREL "幽灵" earlier "新事件" 5..2`, s0.events)
+  const badHtml = renderToString(
+    h(ImportPanel as never, { events: s0.events, onApply: () => {}, initialParsed: bad }),
+  )
+  check(badHtml, '禁止写入', '批量导入：错误时禁止写入')
+  check(badHtml, '第 1 行', '批量导入：错误定位原行号')
+  check(badHtml, '第 2 行', '批量导入：错误定位原行号')
+}
 
 // 2) 主时间窗表 + 三种追溯形态
 const s = buildConsistentSample()
