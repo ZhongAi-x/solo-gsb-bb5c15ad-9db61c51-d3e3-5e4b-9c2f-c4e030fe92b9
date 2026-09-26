@@ -19,6 +19,8 @@ import CyclePanel from './components/CyclePanel'
 import WindowsTable from './components/WindowsTable'
 import RepairPanel from './components/RepairPanel'
 import SchedulePanel from './components/SchedulePanel'
+import BatchImportPanel from './components/BatchImportPanel'
+import type { DslImportEntities } from './lib/dsl'
 
 export default function App() {
   const [state, setState] = useState<AppState>(() => loadState() ?? buildConsistentSample())
@@ -312,6 +314,19 @@ export default function App() {
     setState(kind === 'ok' ? buildConsistentSample() : buildContradictionSample())
   }
 
+  // —— 批量证词导入：解析已在面板内完成（有错误时确认按钮不可用），
+  //    这里把生成好的实体一次性追加合并；state 变更即写入 localStorage，现有数据不被覆盖 ——
+  const importBatch = (entities: DslImportEntities) => {
+    setPreviewIndex(null)
+    setTraceReq(null)
+    setState((s) => ({
+      ...s,
+      events: [...s.events, ...entities.events],
+      constraints: [...s.constraints, ...entities.constraints],
+      observations: [...s.observations, ...entities.observations],
+    }))
+  }
+
   const resetAll = () => {
     if (!window.confirm('确定清空全部事件、约束、观测与本地存储数据吗？')) return
     setPreviewIndex(null)
@@ -515,6 +530,11 @@ export default function App() {
         />
       </div>
 
+      {/* 批量证词导入（全宽）：粘贴 DSL → 只读预览 → 确认后一次性合并 */}
+      <div style={{ marginTop: 16 }}>
+        <BatchImportPanel events={events} onImport={importBatch} />
+      </div>
+
       {/* 时间窗（预览时展示修复后的窗口；正常可满足时展示当前窗口） */}
       {effectiveResult.satisfiable && (
         <div style={{ marginTop: 16 }}>
@@ -552,7 +572,8 @@ export default function App() {
         事件、约束、观测、期望时刻与优先级均自动保存在浏览器 localStorage，刷新不丢失 ·
         旧版单一锚点存档会自动迁移为一条精确观测 ·
         停用某条相对约束可即时验证“去掉该证词后矛盾是否消除” ·
-        观测的新增、编辑、删除与其他任何编辑一样实时重算并持久化；观测作为事实记录不参与修复停用
+        观测的新增、编辑、删除与其他任何编辑一样实时重算并持久化；观测作为事实记录不参与修复停用 ·
+        批量证词导入先解析为只读预览，任何一行有错都禁止写入，确认后一次性合并（不覆盖现有数据）
       </div>
     </div>
   )

@@ -3,6 +3,7 @@ import { DEFAULT_STATE_LIMIT, findMinimalRepairs, MAX_PLANS } from '../src/lib/r
 import { computeMinDeviationSchedule } from '../src/lib/schedule'
 import { buildConsistentSample, buildContradictionSample } from '../src/lib/samples'
 import { migrateState } from '../src/lib/storage'
+import { buildImportEntities, parseDsl } from '../src/lib/dsl'
 import type {
   Constraint,
   LayerResult,
@@ -1032,6 +1033,133 @@ function scheduleFeasible(
   assert(layerOf(r, 'low').D === 0, '排程：多观测下 B 期望精确可达 D=0')
   assert(r.entries[0].offsetMin === 0 && r.entries[1].offsetMin === 20, '排程：两事件分别由各自观测定时')
   assert(scheduleFeasible(events, [], obs, r, ANCHOR_ISO), '排程：多锚定场景可行')
+}
+
+// ==================== 批量证词导入 DSL ====================
+
+// ---- 基本解析：三类语句 + 注释 + 空行 + JSON 转义 ----
+{
+  const text = [
+    '# 注释行被忽略',
+    '',
+    'EVENT "碰撞发生" | "路口\\n监控缺失"',
+    'EVENT "救护车到达" | ""',
+    'REL "碰撞发生" earlier "救护车到达" 8..25',
+    'OBS "救护车到达" 2026-01-01T08:20..2026-01-01T08:35',
+    '   ',
+  ].join('\n')
+  const r = parseDsl(text, [])
+  assert(r.errors.length === 0, 'DSL：合法文本无错误')
+  assert(r.lines.length === 4, 'DSL：空行与注释行不产生语句')
+  assert(r.events.length === 2 && r.constraints.length === 1 && r.observations.length === 1, 'DSL：三类语句各归其类')
+  assert(r.events[0].name === '碰撞发生' && r.events[0].note === '路口\n监控缺失', 'DSL：JSON 转义 \\n 正确解析')
+  assert(r.events[1].note === '', 'DSL：空备注解析为空字符串')
+  assert(r.constraints[0].min === 8 && r.constraints[0].max === 25 && r.constraints[0].relation === 'earlier', 'DSL：REL 区间与方向')
+  assert(r.observations[0].start === '2026-01-01T08:20' && r.observations[0].end === '2026-01-01T08:35', 'DSL：OBS 时间区间')
+  assert(r.lines[0].line === 3, 'DSL：行号按原始行定位（前 2 行为注释与空行）')
+  assert(r.lines[2].targets.a?.existing === false && r.lines[2].targets.b?.existing === false, 'DSL：同批 EVENT 引用标记为本批新增')
+}
+
+// ---- 中文转义与空格分隔时间 ----
+{
+  const r = parseDsl('EVENT "A" | "\\u4f4f\\u9662" \nOBS "A" 2026-01-01 08:00..2026-01-01 08:00', [])
+  assert(r.errors.length === 0, 'DSL：\\uXXXX 转义与空格分隔时间合法')
+  assert(r.events[0].note === '住院', 'DSL：\\u 转义解析为中文')
+  assert(r.observations[0].start === '2026-01-01T08:00' && r.observations[0].end === '2026-01-01T08:00', 'DSL：空格分隔时间归一为 T 分隔（精确时刻）')
+}
+
+// ---- 引用现有事件；现有重名事件导致引用不唯一 ----
+{
+  const existing: TEvent[] = [{ id: 'e1', name: '告警' }]
+  const r = parseDsl('REL "告警" later "新事件" 1..5\nEVENT "新事件" | "n"', existing)
+  assert(r.errors.length === 0, 'DSL：引用现有事件合法')
+  assert(r.lines[0].targets.a?.existing === true, 'DSL：现有事件引用标记为现有')
+  assert(r.lines[0].targets.b?.existing === false, 'DSL：同批声明引用标记为本批新增')
+
+  const dup: TEvent[] = [{ id: 'e1', name: '告警' }, { id: 'e2', name: '告警' }]
+  const r2 = parseDsl('OBS "告警" 2026-01-01T08:00..2026-01-01T08:00', dup)
+  assert(r2.errors.length === 1 && r2.errors[0].line === 1 && r2.errors[0].message.includes('引用不唯一'), 'DSL：现有重名事件 → 引用不唯一并定位行号')
+}
+
+// ---- 重名 / 重复声明 ----
+{
+  const r = parseDsl('EVENT "A" | "x"\nEVENT "A" | "y"', [])
+  assert(r.errors.length === 1 && r.errors[0].line === 2 && r.errors[0].message.includes('重复声明'), 'DSL：批内重复声明定位第二行')
+  const r2 = parseDsl('EVENT "已有" | "x"', [{ id: 'e1', name: '已有' }])
+  assert(r2.errors.length === 1 && r2.errors[0].message.includes('重名'), 'DSL：与现有事件重名被拒绝（不覆盖现有数据）')
+}
+
+// ---- 引用不存在 / 自引用 ----
+{
+  const r = parseDsl('REL "甲" earlier "乙" 1..2', [])
+  assert(r.errors.length === 2 && r.errors.every((e) => e.line === 1 && e.message.includes('引用不存在')), 'DSL：两个未声明引用各报一次且定位行号')
+  const r2 = parseDsl('EVENT "甲" | ""\nREL "甲" later "甲" 1..2', [])
+  assert(r2.errors.length === 1 && r2.errors[0].line === 2 && r2.errors[0].message.includes('不能指向同一事件'), 'DSL：REL 自引用被拒绝')
+}
+
+// ---- 非法区间与时间格式 ----
+{
+  const r1 = parseDsl('EVENT "A" | ""\nEVENT "B" | ""\nREL "A" earlier "B" 30..8', [])
+  assert(r1.errors.length === 1 && r1.errors[0].line === 3 && r1.errors[0].message.includes('非法区间'), 'DSL：min > max 报非法区间')
+  const r2 = parseDsl('EVENT "A" | ""\nOBS "A" 2026-01-01T08:35..2026-01-01T08:20', [])
+  assert(r2.errors.length === 1 && r2.errors[0].line === 2 && r2.errors[0].message.includes('非法区间'), 'DSL：OBS 终点早于起点报非法区间')
+  const r3 = parseDsl('EVENT "A" | ""\nOBS "A" 2026-02-30T08:00..2026-03-01T08:00', [])
+  assert(r3.errors.length === 1 && r3.errors[0].message.includes('时间格式非法'), 'DSL：不存在的日期被拒绝')
+  const r4 = parseDsl('EVENT "A" | ""\nOBS "A" 2026-01-01T25:00..2026-01-01T26:00', [])
+  assert(r4.errors.length === 1 && r4.errors[0].message.includes('时间格式非法'), 'DSL：小时 25 被拒绝')
+  const r5 = parseDsl('EVENT "A" | ""\nOBS "A" 2026/01/01T08:00..2026/01/02T08:00', [])
+  assert(r5.errors.length === 1 && r5.errors[0].message.includes('时间区间格式'), 'DSL：斜杠日期被拒绝')
+  const r6 = parseDsl('EVENT "A" | ""\nEVENT "B" | ""\nREL "A" earlier "B" 1.5..3', [])
+  assert(r6.errors.length === 1 && r6.errors[0].message.includes('分钟区间格式'), 'DSL：小数分钟被拒绝')
+}
+
+// ---- 语法错误：缺引号 / 缺竖线 / 尾部垃圾 / 未知关键字 / 非法转义 ----
+{
+  const r1 = parseDsl('EVENT 碰撞 | "n"', [])
+  assert(r1.errors.length === 1 && r1.errors[0].message.includes('JSON 字符串'), 'DSL：名称未加引号报错')
+  const r2 = parseDsl('EVENT "A" "n"', [])
+  assert(r2.errors.length === 1 && r2.errors[0].message.includes('"|"'), 'DSL：缺少竖线报错')
+  const r3 = parseDsl('EVENT "A" | "n" extra', [])
+  assert(r3.errors.length === 1 && r3.errors[0].message.includes('尾部'), 'DSL：尾部多余内容报错')
+  const r4 = parseDsl('FOO "A"', [])
+  assert(r4.errors.length === 1 && r4.errors[0].message.includes('EVENT、REL 或 OBS'), 'DSL：未知语句类型报错')
+  const r5 = parseDsl('EVENT "A" | "\\q"', [])
+  assert(r5.errors.length === 1 && r5.errors[0].message.includes('非法 JSON 字符串'), 'DSL：非法转义报错')
+  const r6 = parseDsl('EVENT "A" | "未闭合', [])
+  assert(r6.errors.length === 1 && r6.errors[0].message.includes('结束引号'), 'DSL：未闭合字符串报错')
+  const r7 = parseDsl('EVENT "A" | ""\nEVENT "B" | ""\nREL "A" middle "B" 1..2', [])
+  assert(r7.errors.length === 1 && r7.errors[0].message.includes('earlier'), 'DSL：非法关系方向报错')
+}
+
+// ---- 同批 EVENT 声明顺序无关（前向引用合法）；lines 完整列出供逐行预览 ----
+{
+  const r = parseDsl('EVENT "A" | "x"\nREL "A" earlier "B" 1..2\nEVENT "B" | "y"', [])
+  assert(r.errors.length === 0, 'DSL：同批 EVENT 声明顺序无关，前向引用合法')
+  assert(r.lines.length === 3, 'DSL：三条语句全部进入预览')
+}
+
+// ---- 确认导入：实体生成与合并不覆盖现有数据 ----
+{
+  const existing: TEvent[] = [{ id: 'e1', name: '告警', note: '原有备注' }]
+  const text = [
+    'EVENT "介入" | "值班工程师"',
+    'REL "介入" later "告警" 2..5',
+    'OBS "告警" 2026-01-01T08:00..2026-01-01T08:00',
+  ].join('\n')
+  const r = parseDsl(text, existing)
+  assert(r.errors.length === 0, 'DSL：混合现有/新增引用的文本无错误')
+  const ent = buildImportEntities(r, existing)
+  assert(ent.events.length === 1 && ent.events[0].name === '介入' && ent.events[0].note === '值班工程师', 'DSL：仅新增声明的事件')
+  assert(ent.constraints.length === 1 && ent.constraints[0].aId === ent.events[0].id && ent.constraints[0].bId === 'e1', 'DSL：约束正确映射到新增/现有事件 id')
+  assert(ent.constraints[0].enabled === true, 'DSL：导入的约束默认启用')
+  assert(ent.observations.length === 1 && ent.observations[0].eventId === 'e1', 'DSL：观测挂到现有事件')
+  assert(ent.eventIdByName.get('告警') === 'e1' && ent.eventIdByName.get('介入') === ent.events[0].id, 'DSL：名称→id 映射完整')
+  // 合并后现有事件保持原样（不覆盖）
+  const merged = [...existing, ...ent.events]
+  assert(merged[0].id === 'e1' && merged[0].note === '原有备注', 'DSL：合并不覆盖现有事件')
+  // 合并结果可直接进入图分析
+  const ana = analyze(merged, ent.constraints, ent.observations)
+  assert(ana.satisfiable && ana.baseISO === '2026-01-01T08:00', 'DSL：导入结果接入统一差分图')
 }
 
 console.log(`\n${passed} passed, ${failed} failed`)

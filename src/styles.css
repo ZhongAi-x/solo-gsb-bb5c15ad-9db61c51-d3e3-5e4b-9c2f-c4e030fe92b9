@@ -1044,3 +1044,125 @@ table.windows tr.traced td {
   border: 1px solid rgba(248, 81, 73, 0.55);
   color: var(--danger-strong);
 }
+
+/* ---------- 批量证词导入 ---------- */
+.dsl-panel textarea.dsl-textarea {
+  width: 100%;
+  box-sizing: border-box;
+  background: var(--bg-panel-2);
+  border: 1px solid var(--border);
+  border-radius: var(--radius);
+  color: var(--text);
+  font-family: var(--mono);
+  font-size: 12.5px;
+  line-height: 1.6;
+  padding: 10px 12px;
+  resize: vertical;
+}
+.dsl-panel textarea.dsl-textarea:focus {
+  outline: none;
+  border-color: var(--accent);
+}
+.dsl-help {
+  margin-bottom: 10px;
+  font-size: 12.5px;
+  color: var(--text-dim);
+}
+.dsl-help summary {
+  cursor: pointer;
+  color: var(--accent);
+}
+.dsl-grammar {
+  margin: 8px 0;
+  display: grid;
+  gap: 4px;
+}
+.dsl-grammar code {
+  font-family: var(--mono);
+  background: var(--bg-panel-2);
+  border: 1px solid var(--border);
+  border-radius: 4px;
+  padding: 1px 6px;
+  color: #9db4c7;
+}
+.dsl-example {
+  margin: 8px 0 0;
+  padding: 10px 12px;
+  background: var(--bg-panel-2);
+  border: 1px solid var(--border);
+  border-radius: var(--radius);
+  font-family: var(--mono);
+  font-size: 12px;
+  line-height: 1.6;
+  color: var(--text-dim);
+  overflow-x: auto;
+}
+.dsl-note {
+  color: var(--text-muted);
+  font-size: 12px;
+}
+.dsl-done {
+  margin-top: 10px;
+  padding: 8px 12px;
+  border-radius: var(--radius);
+  background: var(--ok-bg);
+  border: 1px solid rgba(63, 185, 80, 0.5);
+  color: var(--ok);
+  font-size: 13px;
+}
+.dsl-preview {
+  margin-top: 12px;
+}
+.dsl-summary {
+  font-size: 13px;
+  margin-bottom: 8px;
+}
+.dsl-ok-text {
+  color: var(--ok);
+  font-weight: 600;
+}
+.dsl-err-text {
+  color: var(--danger-strong);
+}
+.dsl-error-list {
+  margin: 0 0 10px;
+  padding: 8px 12px 8px 28px;
+  border-radius: var(--radius);
+  background: var(--danger-bg);
+  border: 1px solid rgba(248, 81, 73, 0.55);
+  color: var(--danger-strong);
+  font-size: 12.5px;
+  display: grid;
+  gap: 3px;
+}
+.dsl-table {
+  width: 100%;
+  border-collapse: collapse;
+  font-size: 12.5px;
+}
+.dsl-table th,
+.dsl-table td {
+  text-align: left;
+  padding: 5px 8px;
+  border-bottom: 1px solid var(--border);
+  vertical-align: top;
+}
+.dsl-table th {
+  color: var(--text-muted);
+  font-weight: 600;
+  font-size: 12px;
+}
+.dsl-table .dsl-line-no {
+  font-family: var(--mono);
+  color: var(--text-muted);
+  white-space: nowrap;
+}
+.dsl-table tr.dsl-row-error {
+  background: var(--danger-bg);
+}
+.dsl-table tr.dsl-row-error td {
+  border-bottom-color: rgba(248, 81, 73, 0.4);
+}
+.dsl-desc .badge {
+  margin: 0 2px;
+}

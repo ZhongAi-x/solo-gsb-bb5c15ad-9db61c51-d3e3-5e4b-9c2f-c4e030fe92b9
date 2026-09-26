@@ -31,6 +31,8 @@ check(appHtml, '点击最早/最晚时间可追溯边界推导链', 'App')
 check(appHtml, '时间基准', 'App')
 check(appHtml, '时间原点', 'App')
 check(appHtml, '绝对时间观测', 'App')
+check(appHtml, '批量证词导入', 'App')
+check(appHtml, 'EVENT / REL / OBS', 'App')
 check(appHtml, '精确时刻（零宽区间）', 'App')
 check(appHtml, '直接观测', 'App')
 
